@@ -109,7 +109,7 @@ jobs:
         cd "${BUILD_DIR}"
         cmake --build . --target ma_dyncol-t -- -j2 > "${RESULTS_DIR}/build_before.log" 2>&1
         tail -n 15 "${RESULTS_DIR}/build_before.log"
-        find . -name 'ma_dyncol-t' -type f | tee "${RESULTS_DIR}/binpath.txt"
+        find "${BUILD_DIR}" -name 'ma_dyncol-t' -type f | tee "${RESULTS_DIR}/binpath.txt"
 
     - name: BEFORE fix - run unittest (expect ASan stack-buffer-overflow)
       run: |
@@ -193,4 +193,3 @@ jobs:
           results/binpath.txt
           mdb-sha.txt
         retention-days: 30
-# reindex
