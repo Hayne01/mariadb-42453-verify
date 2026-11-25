@@ -8,6 +8,12 @@ name: Verify MDEV-42453 (dyncol backwritenum stack-buffer-overflow)
 
 on:
   workflow_dispatch:
+    inputs:
+      mdb_ref:
+        description: MariaDB/server branch or commit to verify
+        required: false
+        default: main
+        type: string
   push:
     branches: [main]
 
@@ -15,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: verify-42453-${{ github.ref }}
+  group: verify-42453-${{ github.ref }}-${{ inputs.mdb_ref || 'main' }}
   cancel-in-progress: true
 
 jobs:
@@ -38,11 +44,11 @@ jobs:
           libcurl4-openssl-dev libxml2-dev liblzma-dev liblz4-dev libzstd-dev \
           libsnappy-dev libjemalloc-dev libnuma-dev libsystemd-dev libboost-dev
 
-    - name: Checkout MariaDB/server (main)
+    - name: Checkout MariaDB/server
       uses: actions/checkout@v4
       with:
         repository: MariaDB/server
-        ref: main
+        ref: ${{ inputs.mdb_ref || 'main' }}
         path: mariadb
         fetch-depth: 1
         submodules: false
@@ -64,7 +70,7 @@ jobs:
           echo "MDB_SHA=${sha}"
         } | tee -a "$GITHUB_ENV"
         mkdir -p "${GITHUB_WORKSPACE}/results" "${GITHUB_WORKSPACE}/build"
-        echo "MariaDB main commit: ${sha}"
+        echo "MariaDB commit: ${sha}"
         printf '%s\n' "${sha}" > "${GITHUB_WORKSPACE}/mdb-sha.txt"
 
     - name: Add MDEV-42453 regression test (test-only, no code fix yet)
@@ -172,7 +178,7 @@ jobs:
         fi
         {
           echo "# MDEV-42453 runtime verification"
-          echo "- MariaDB main commit: $(cat ${GITHUB_WORKSPACE}/mdb-sha.txt)"
+          echo "- MariaDB commit: $(cat ${GITHUB_WORKSPACE}/mdb-sha.txt)"
           echo "- ma_dyncol-t unittest (ASan): before=${ub}, after=${ua}"
         } >> "$GITHUB_STEP_SUMMARY"
         if [ "${ok}" = "1" ]; then
