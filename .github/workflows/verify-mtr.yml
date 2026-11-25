@@ -110,7 +110,7 @@ jobs:
       run: |
         set -eo pipefail
         cd "${BUILD_DIR}"
-        cmake --build . --target mariadbd mariadb-test mariadb mariadb-admin my_print_defaults -- -j2 > "${RESULTS_DIR}/build.log" 2>&1
+        cmake --build . --target mariadbd mariadb-test mariadb mariadb-admin my_print_defaults my_safe_process -- -j2 > "${RESULTS_DIR}/build.log" 2>&1
         tail -n 15 "${RESULTS_DIR}/build.log"
 
     - name: Run mysql-test-run.pl main.dyncol
