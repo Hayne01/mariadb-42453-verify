@@ -1,0 +1,166 @@
+name: Verify MDEV-42453 mtr (main.dyncol with the new result file)
+
+# Scratch runtime verification ONLY. Builds a minimal MariaDB server with the
+# full fix patch applied and runs mysql-test-run.pl main.dyncol so the shipped
+# dyncol.test / dyncol.result pair is checked against a real server.
+# Never commits to or opens a PR against MariaDB/server upstream.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mdb_ref:
+        description: MariaDB/server branch or commit to verify
+        required: false
+        default: '10.11'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-42453-mtr-${{ inputs.mdb_ref || '10.11' }}
+  cancel-in-progress: true
+
+jobs:
+  mtr:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+    - name: Free Disk Space
+      run: |
+        df -h /
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL || true
+        df -h /
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake bison git perl pkg-config \
+          libncurses5-dev libssl-dev libaio-dev libpcre2-dev zlib1g-dev \
+          libcurl4-openssl-dev libxml2-dev liblzma-dev liblz4-dev libzstd-dev \
+          libsnappy-dev libjemalloc-dev libnuma-dev libsystemd-dev libboost-dev
+
+    - name: Checkout MariaDB/server
+      uses: actions/checkout@v4
+      with:
+        repository: MariaDB/server
+        ref: ${{ inputs.mdb_ref || '10.11' }}
+        path: mariadb
+        fetch-depth: 1
+        submodules: false
+
+    - name: Checkout verification tools (this repo)
+      uses: actions/checkout@v4
+      with:
+        path: tools
+
+    - name: Resolve parameters
+      run: |
+        set -euo pipefail
+        sha=$(git -C mariadb rev-parse HEAD)
+        {
+          echo "SRC_DIR=${GITHUB_WORKSPACE}/mariadb"
+          echo "TOOLS_DIR=${GITHUB_WORKSPACE}/tools"
+          echo "RESULTS_DIR=${GITHUB_WORKSPACE}/results"
+          echo "BUILD_DIR=${GITHUB_WORKSPACE}/build"
+        } | tee -a "$GITHUB_ENV"
+        mkdir -p "${GITHUB_WORKSPACE}/results" "${GITHUB_WORKSPACE}/build"
+        echo "MariaDB commit: ${sha}"
+        printf '%s\n' "${sha}" > "${GITHUB_WORKSPACE}/mdb-sha.txt"
+
+    - name: Apply full fix patch (code + tests + mtr result)
+      run: |
+        set -eo pipefail
+        cd "${SRC_DIR}"
+        git apply --verbose "${TOOLS_DIR}/fix.patch"
+        grep -n "DYNCOL_NUM_CHAR_LOOKUP" mysys/ma_dyncol.c
+        tail -n 6 mysql-test/main/dyncol.test
+
+    - name: CMake configure (Debug, no ASan, engines off)
+      run: |
+        set -eo pipefail
+        cd "${BUILD_DIR}"
+        cmake "${SRC_DIR}" \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DWITH_ASAN=OFF \
+          -DWITH_SAFEMALLOC=OFF \
+          -DWITH_SSL=system \
+          -DWITH_UNIT_TESTS=OFF \
+          -DUPDATE_SUBMODULES=ON \
+          -DWITH_WSREP=OFF \
+          -DWITH_MARIABACKUP=OFF \
+          -DWITHOUT_MARIABACKUP=1 \
+          -DPLUGIN_ROCKSDB=NO \
+          -DPLUGIN_COLUMNSTORE=NO \
+          -DPLUGIN_MROONGA=NO \
+          -DPLUGIN_OQGRAPH=NO \
+          -DPLUGIN_SPHINX=NO \
+          -DPLUGIN_TOKUDB=NO \
+          -DPLUGIN_CONNECT=NO \
+          -DPLUGIN_SPIDER=NO \
+          -DPLUGIN_PERFSCHEMA=NO \
+          -DWITH_MARIAS3=OFF \
+          > "${RESULTS_DIR}/cmake_configure.log" 2>&1 && rc=0 || rc=$?
+        echo "configure_exit=${rc}" | tee -a "${RESULTS_DIR}/cmake_configure.log"
+        tail -n 30 "${RESULTS_DIR}/cmake_configure.log"
+        exit ${rc}
+
+    - name: Build server and mtr clients
+      run: |
+        set -eo pipefail
+        cd "${BUILD_DIR}"
+        cmake --build . --target mariadbd mysqltest mysql mysqladmin my_print_defaults -- -j2 > "${RESULTS_DIR}/build.log" 2>&1
+        tail -n 15 "${RESULTS_DIR}/build.log"
+
+    - name: Run mysql-test-run.pl main.dyncol
+      run: |
+        set -uo pipefail
+        cd "${BUILD_DIR}/mysql-test"
+        perl mysql-test-run.pl --suite=main --do-test=dyncol --force --max-test-fail=0 \
+          --parallel=1 --retry=0 --vardir="${RESULTS_DIR}/var" --tmpdir="${RESULTS_DIR}/tmp" \
+          > "${RESULTS_DIR}/mtr.log" 2>&1 && rc=0 || rc=$?
+        echo "mtr_exit=${rc}" | tee -a "${RESULTS_DIR}/mtr.log"
+        tail -n 30 "${RESULTS_DIR}/mtr.log" || true
+        if [ "${rc}" -eq 0 ] && grep -Eq "dyncol +\[ pass \]" "${RESULTS_DIR}/mtr.log"; then
+          echo "MTR_DYNCOL_PASS" > "${RESULTS_DIR}/mtr.verdict"
+        else
+          echo "MTR_DYNCOL_FAIL" > "${RESULTS_DIR}/mtr.verdict"
+        fi
+        cat "${RESULTS_DIR}/mtr.verdict"
+
+    - name: Assert mtr pass
+      run: |
+        set -uo pipefail
+        v=$(cat "${RESULTS_DIR}/mtr.verdict")
+        {
+          echo "# MDEV-42453 mtr verification"
+          echo "- MariaDB commit: $(cat ${GITHUB_WORKSPACE}/mdb-sha.txt)"
+          echo "- main.dyncol with shipped result: ${v}"
+        } >> "$GITHUB_STEP_SUMMARY"
+        if [ "${v}" != "MTR_DYNCOL_PASS" ]; then
+          echo "::error::main.dyncol did not pass with the shipped result file."
+          exit 1
+        fi
+        echo "PASS: main.dyncol matches the shipped dyncol.result." | tee -a "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload logs
+      if: ${{ !cancelled() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: verify-42453-mtr-logs
+        path: |
+          results/mtr.log
+          results/mtr.verdict
+          results/build.log
+          results/cmake_configure.log
+          mdb-sha.txt
+        retention-days: 30
+
+    - name: Upload server logs on failure
+      if: ${{ failure() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: verify-42453-mtr-varlog
+        path: results/var/log
+        retention-days: 30
