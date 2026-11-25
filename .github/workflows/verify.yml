@@ -193,3 +193,4 @@ jobs:
           results/binpath.txt
           mdb-sha.txt
         retention-days: 30
+# reindex
