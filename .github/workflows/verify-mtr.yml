@@ -74,7 +74,7 @@ jobs:
         set -eo pipefail
         cd "${SRC_DIR}"
         git apply --verbose "${TOOLS_DIR}/fix.patch"
-        grep -n "DYNCOL_NUM_CHAR_LOOKUP" mysys/ma_dyncol.c
+        grep -n "DYNCOL_NUM_KEY_MAX" mysys/ma_dyncol.c
         tail -n 6 mysql-test/main/dyncol.test
 
     - name: CMake configure (Debug, no ASan, engines off)
