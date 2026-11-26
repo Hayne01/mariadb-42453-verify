@@ -139,7 +139,7 @@ jobs:
         set -eo pipefail
         cd "${SRC_DIR}"
         git apply --verbose --include='mysys/ma_dyncol.c' "${TOOLS_DIR}/fix.patch"
-        echo "=== DYNCOL_NUM_CHAR_LOOKUP now present ==="; grep -n "DYNCOL_NUM_CHAR_LOOKUP" mysys/ma_dyncol.c
+        echo "=== DYNCOL_NUM_KEY_MAX guard now present ==="; grep -n "DYNCOL_NUM_KEY_MAX" mysys/ma_dyncol.c
 
     - name: Build ma_dyncol-t AFTER fix (incremental)
       run: |
