@@ -1,59 +1,77 @@
 diff --git a/mysys/ma_dyncol.c b/mysys/ma_dyncol.c
 --- a/mysys/ma_dyncol.c
 +++ b/mysys/ma_dyncol.c
-@@ -112,6 +112,13 @@
+@@ -112,6 +112,8 @@
  #define MAX_OFFSET_LENGTH_NM 5
-
+ 
  #define DYNCOL_NUM_CHAR 6
-+/*
-+  A numeric lookup key arrives from SQL as a uint (up to 4294967295, i.e. 10
-+  decimal digits), not just the 2-byte stored key that DYNCOL_NUM_CHAR fits.
-+  backwritenum() renders the key backward into the lookup buffer, so the buffer
-+  must hold every digit of a uint or it underflows (MDEV-42453).
-+*/
-+#define DYNCOL_NUM_CHAR_LOOKUP 10
-
++/* Largest numeric lookup key that fits in DYNCOL_NUM_CHAR decimal digits */
++#define DYNCOL_NUM_KEY_MAX 999999
+ 
  my_bool mariadb_dyncol_has_names(DYNAMIC_COLUMN *str)
  {
-@@ -2119,7 +2126,7 @@
+@@ -2119,7 +2121,7 @@
  find_column(DYN_HEADER *hdr, uint numkey, LEX_STRING *strkey)
  {
    LEX_STRING nmkey;
 -  char nmkeybuff[DYNCOL_NUM_CHAR]; /* to fit max 2 bytes number */
-+  char nmkeybuff[DYNCOL_NUM_CHAR_LOOKUP]; /* fit any uint lookup key */
++  char nmkeybuff[DYNCOL_NUM_CHAR]; /* fits keys up to DYNCOL_NUM_KEY_MAX */
    DBUG_ASSERT(hdr->header != NULL);
-
+ 
    if (hdr->header + hdr->header_size > hdr->data_end)
+@@ -2139,6 +2141,16 @@
+   }
+   else if (hdr->format == dyncol_fmt_str && strkey == NULL)
+   {
++    /*
++      Numeric keys with more than DYNCOL_NUM_CHAR digits do not fit
++      nmkeybuff. Report not-found for them (such names remain reachable
++      by string key) instead of overflowing the buffer (MDEV-42453).
++    */
++    if (numkey > DYNCOL_NUM_KEY_MAX)
++    {
++      hdr->type= DYN_COL_NULL;
++      return 0;
++    }
+     nmkey.str= backwritenum(nmkeybuff + sizeof(nmkeybuff), numkey);
+     nmkey.length= (nmkeybuff + sizeof(nmkeybuff)) - nmkey.str;
+     strkey= &nmkey;
 diff --git a/unittest/mysys/ma_dyncol-t.c b/unittest/mysys/ma_dyncol-t.c
 --- a/unittest/mysys/ma_dyncol-t.c
 +++ b/unittest/mysys/ma_dyncol-t.c
-@@ -818,6 +818,48 @@
+@@ -818,6 +818,64 @@
  }
-
-
+ 
+ 
 +/*
-+  MDEV-42453: a numeric lookup key with >= 7 decimal digits underflowed the
-+  6-byte nmkeybuff in find_column() (backwritenum() writes digits backward from
-+  the buffer end), a stack-buffer-overflow WRITE reachable by any user via
-+  COLUMN_GET / COLUMN_EXISTS on a string-format dynamic column. The lookup must
-+  return NULL / not-found instead of crashing.
++  MDEV-42453: a numeric lookup key with more than 6 decimal digits
++  underflowed the 6-byte nmkeybuff in find_column() (backwritenum()
++  writes digits backward from the buffer end), a stack-buffer-overflow
++  WRITE reachable via COLUMN_GET / COLUMN_EXISTS on a string-format
++  dynamic column. Such keys must be reported as not-found; names with
++  up to 6 digits stay reachable by numeric key, longer names by string
++  key.
 +*/
 +static void test_mdev_42453()
 +{
 +  DYNAMIC_COLUMN str;
-+  DYNAMIC_COLUMN_VALUE val, res;
-+  MYSQL_LEX_STRING key;
++  DYNAMIC_COLUMN_VALUE vals[3], res;
++  MYSQL_LEX_STRING keys[3];
 +  uint large_keys[4]= {1000000, 9999999, 2147483647, 4294967295U};
 +  uint i;
 +  int rc;
 +
-+  key.length= 1;
-+  key.str= (char *) "a";
-+  val.type= DYN_COL_INT;
-+  val.x.long_value= 1;
++  keys[0].str= (char *) "a";       keys[0].length= 1;
++  keys[1].str= (char *) "100000";  keys[1].length= 6;
++  keys[2].str= (char *) "1000000"; keys[2].length= 7;
++  for (i= 0; i < 3; i++)
++  {
++    vals[i].type= DYN_COL_INT;
++    vals[i].x.long_value= i + 1;
++  }
 +
 +  mariadb_dyncol_init(&str);
-+  rc= mariadb_dyncol_create_many_named(&str, 1, &key, &val, 1);
++  rc= mariadb_dyncol_create_many_named(&str, 3, keys, vals, 1);
 +  ok(rc == ER_DYNCOL_OK, "MDEV-42453 create named blob");
 +
 +  for (i= 0; i < 4; i++)
@@ -65,7 +83,17 @@ diff --git a/unittest/mysys/ma_dyncol-t.c b/unittest/mysys/ma_dyncol-t.c
 +  }
 +
 +  mariadb_dyncol_value_init(&res);
-+  rc= mariadb_dyncol_get_named(&str, &key, &res);
++  rc= mariadb_dyncol_get_num(&str, 100000, &res);
++  ok(rc == ER_DYNCOL_OK && res.type == DYN_COL_INT && res.x.long_value == 2,
++     "MDEV-42453 6-digit numeric key still found");
++
++  mariadb_dyncol_value_init(&res);
++  rc= mariadb_dyncol_get_named(&str, &keys[2], &res);
++  ok(rc == ER_DYNCOL_OK && res.type == DYN_COL_INT && res.x.long_value == 3,
++     "MDEV-42453 7-digit name found by string key");
++
++  mariadb_dyncol_value_init(&res);
++  rc= mariadb_dyncol_get_named(&str, &keys[0], &res);
 +  ok(rc == ER_DYNCOL_OK && res.type == DYN_COL_INT && res.x.long_value == 1,
 +     "MDEV-42453 named lookup still works");
 +
@@ -76,35 +104,35 @@ diff --git a/unittest/mysys/ma_dyncol-t.c b/unittest/mysys/ma_dyncol-t.c
  #define BIG_STRING_SIZE (1024*1024)
  int main(int argc __attribute__((unused)), char **argv)
  {
-@@ -825,7 +867,7 @@
+@@ -825,7 +883,7 @@
    char *big_string= (char *)malloc(BIG_STRING_SIZE);
-
+ 
    MY_INIT(argv[0]);
 -  plan(74);
-+  plan(80);
-
++  plan(82);
+ 
    if (!big_string)
      exit(1);
-@@ -962,6 +1004,7 @@
+@@ -962,6 +1020,7 @@
    test_overlong_int(DYN_COL_UINT, "uint");
    test_overlong_int(DYN_COL_INT, "sint");
    test_decimal_precision_overflow();
 +  test_mdev_42453();
-
+ 
    my_end(0);
    return exit_status();
 diff --git a/mysql-test/main/dyncol.test b/mysql-test/main/dyncol.test
 --- a/mysql-test/main/dyncol.test
 +++ b/mysql-test/main/dyncol.test
-@@ -1061,3 +1061,15 @@
+@@ -1061,3 +1061,23 @@
  SELECT COLUMN_CHECK(COLUMN_CREATE(1, 0.1234567890123456789012345678901234567890123456789 AS decimal)) AS ex;
-
+ 
  --echo # End of 10.11 tests
 +
 +--echo #
 +--echo # MDEV-42453 Stack-buffer-overflow write in dynamic-column backwritenum
-+--echo # on a numeric key with >= 7 decimal digits. The lookup must return
-+--echo # NULL / not-found, never crash the server.
++--echo # on a numeric key with >= 7 decimal digits. Numeric lookup keys are
++--echo # limited to 6 digits; larger keys return NULL / not-found, never crash.
 +--echo #
 +SELECT COLUMN_GET(COLUMN_CREATE('a',1), 1000000 AS INT);
 +SELECT COLUMN_GET(COLUMN_CREATE('a',1), 2147483647 AS INT);
@@ -112,17 +140,25 @@ diff --git a/mysql-test/main/dyncol.test b/mysql-test/main/dyncol.test
 +SELECT COLUMN_GET(COLUMN_CREATE('a',1), 1000000 AS CHAR);
 +SELECT COLUMN_EXISTS(COLUMN_CREATE('a',1), 1000000);
 +SELECT COLUMN_EXISTS(COLUMN_CREATE('a',1), 'a');
++--echo # 6-digit numeric names remain reachable by numeric key
++SELECT COLUMN_GET(COLUMN_CREATE('100000', 2), 100000 AS INT);
++SELECT COLUMN_GET(COLUMN_CREATE('999999', 3), 999999 AS INT);
++--echo # Longer names: numeric lookup is rejected, string lookup still works
++SELECT COLUMN_GET(COLUMN_CREATE('1000000', 4), 1000000 AS INT);
++SELECT COLUMN_GET(COLUMN_CREATE('1000000', 4), '1000000' AS INT);
++SELECT COLUMN_EXISTS(COLUMN_CREATE('1000000', 4), 1000000);
++SELECT COLUMN_EXISTS(COLUMN_CREATE('1000000', 4), '1000000');
 diff --git a/mysql-test/main/dyncol.result b/mysql-test/main/dyncol.result
 --- a/mysql-test/main/dyncol.result
 +++ b/mysql-test/main/dyncol.result
-@@ -2007,3 +2007,26 @@
+@@ -2007,3 +2007,46 @@
  ex
  1
  # End of 10.11 tests
 +#
 +# MDEV-42453 Stack-buffer-overflow write in dynamic-column backwritenum
-+# on a numeric key with >= 7 decimal digits. The lookup must return
-+# NULL / not-found, never crash the server.
++# on a numeric key with >= 7 decimal digits. Numeric lookup keys are
++# limited to 6 digits; larger keys return NULL / not-found, never crash.
 +#
 +SELECT COLUMN_GET(COLUMN_CREATE('a',1), 1000000 AS INT);
 +COLUMN_GET(COLUMN_CREATE('a',1), 1000000 AS INT)
@@ -141,4 +177,24 @@ diff --git a/mysql-test/main/dyncol.result b/mysql-test/main/dyncol.result
 +NULL
 +SELECT COLUMN_EXISTS(COLUMN_CREATE('a',1), 'a');
 +COLUMN_EXISTS(COLUMN_CREATE('a',1), 'a')
++1
++# 6-digit numeric names remain reachable by numeric key
++SELECT COLUMN_GET(COLUMN_CREATE('100000', 2), 100000 AS INT);
++COLUMN_GET(COLUMN_CREATE('100000', 2), 100000 AS INT)
++2
++SELECT COLUMN_GET(COLUMN_CREATE('999999', 3), 999999 AS INT);
++COLUMN_GET(COLUMN_CREATE('999999', 3), 999999 AS INT)
++3
++# Longer names: numeric lookup is rejected, string lookup still works
++SELECT COLUMN_GET(COLUMN_CREATE('1000000', 4), 1000000 AS INT);
++COLUMN_GET(COLUMN_CREATE('1000000', 4), 1000000 AS INT)
++NULL
++SELECT COLUMN_GET(COLUMN_CREATE('1000000', 4), '1000000' AS INT);
++COLUMN_GET(COLUMN_CREATE('1000000', 4), '1000000' AS INT)
++4
++SELECT COLUMN_EXISTS(COLUMN_CREATE('1000000', 4), 1000000);
++COLUMN_EXISTS(COLUMN_CREATE('1000000', 4), 1000000)
++NULL
++SELECT COLUMN_EXISTS(COLUMN_CREATE('1000000', 4), '1000000');
++COLUMN_EXISTS(COLUMN_CREATE('1000000', 4), '1000000')
 +1
