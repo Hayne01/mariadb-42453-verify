@@ -106,7 +106,7 @@ jobs:
         tail -n 30 "${RESULTS_DIR}/cmake_configure.log"
         exit ${rc}
 
-    - name: Build default target (all clients + helpers + plugins)
+    - name: Build server and mtr clients
       run: |
         set -eo pipefail
         cd "${BUILD_DIR}"
