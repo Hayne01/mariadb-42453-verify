@@ -3,7 +3,7 @@ diff --git a/mysys/ma_dyncol.c b/mysys/ma_dyncol.c
 +++ b/mysys/ma_dyncol.c
 @@ -112,6 +112,13 @@
  #define MAX_OFFSET_LENGTH_NM 5
- 
+
  #define DYNCOL_NUM_CHAR 6
 +/*
 +  A numeric lookup key arrives from SQL as a uint (up to 4294967295, i.e. 10
@@ -12,7 +12,7 @@ diff --git a/mysys/ma_dyncol.c b/mysys/ma_dyncol.c
 +  must hold every digit of a uint or it underflows (MDEV-42453).
 +*/
 +#define DYNCOL_NUM_CHAR_LOOKUP 10
- 
+
  my_bool mariadb_dyncol_has_names(DYNAMIC_COLUMN *str)
  {
 @@ -2119,7 +2126,7 @@
@@ -22,15 +22,15 @@ diff --git a/mysys/ma_dyncol.c b/mysys/ma_dyncol.c
 -  char nmkeybuff[DYNCOL_NUM_CHAR]; /* to fit max 2 bytes number */
 +  char nmkeybuff[DYNCOL_NUM_CHAR_LOOKUP]; /* fit any uint lookup key */
    DBUG_ASSERT(hdr->header != NULL);
- 
+
    if (hdr->header + hdr->header_size > hdr->data_end)
 diff --git a/unittest/mysys/ma_dyncol-t.c b/unittest/mysys/ma_dyncol-t.c
 --- a/unittest/mysys/ma_dyncol-t.c
 +++ b/unittest/mysys/ma_dyncol-t.c
 @@ -818,6 +818,48 @@
  }
- 
- 
+
+
 +/*
 +  MDEV-42453: a numeric lookup key with >= 7 decimal digits underflowed the
 +  6-byte nmkeybuff in find_column() (backwritenum() writes digits backward from
@@ -78,11 +78,11 @@ diff --git a/unittest/mysys/ma_dyncol-t.c b/unittest/mysys/ma_dyncol-t.c
  {
 @@ -825,7 +867,7 @@
    char *big_string= (char *)malloc(BIG_STRING_SIZE);
- 
+
    MY_INIT(argv[0]);
 -  plan(74);
 +  plan(80);
- 
+
    if (!big_string)
      exit(1);
 @@ -962,6 +1004,7 @@
@@ -90,15 +90,15 @@ diff --git a/unittest/mysys/ma_dyncol-t.c b/unittest/mysys/ma_dyncol-t.c
    test_overlong_int(DYN_COL_INT, "sint");
    test_decimal_precision_overflow();
 +  test_mdev_42453();
- 
+
    my_end(0);
    return exit_status();
 diff --git a/mysql-test/main/dyncol.test b/mysql-test/main/dyncol.test
 --- a/mysql-test/main/dyncol.test
 +++ b/mysql-test/main/dyncol.test
-@@ -1061,3 +1061,14 @@
+@@ -1061,3 +1061,15 @@
  SELECT COLUMN_CHECK(COLUMN_CREATE(1, 0.1234567890123456789012345678901234567890123456789 AS decimal)) AS ex;
- 
+
  --echo # End of 10.11 tests
 +
 +--echo #
@@ -111,10 +111,11 @@ diff --git a/mysql-test/main/dyncol.test b/mysql-test/main/dyncol.test
 +SELECT COLUMN_GET(COLUMN_CREATE('a',1), 4294967295 AS INT);
 +SELECT COLUMN_GET(COLUMN_CREATE('a',1), 1000000 AS CHAR);
 +SELECT COLUMN_EXISTS(COLUMN_CREATE('a',1), 1000000);
++SELECT COLUMN_EXISTS(COLUMN_CREATE('a',1), 'a');
 diff --git a/mysql-test/main/dyncol.result b/mysql-test/main/dyncol.result
 --- a/mysql-test/main/dyncol.result
 +++ b/mysql-test/main/dyncol.result
-@@ -2007,3 +2007,23 @@
+@@ -2007,3 +2007,26 @@
  ex
  1
  # End of 10.11 tests
@@ -137,4 +138,7 @@ diff --git a/mysql-test/main/dyncol.result b/mysql-test/main/dyncol.result
 +NULL
 +SELECT COLUMN_EXISTS(COLUMN_CREATE('a',1), 1000000);
 +COLUMN_EXISTS(COLUMN_CREATE('a',1), 1000000)
-+0
++NULL
++SELECT COLUMN_EXISTS(COLUMN_CREATE('a',1), 'a');
++COLUMN_EXISTS(COLUMN_CREATE('a',1), 'a')
++1
